@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+  <title>Image Fold</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --fg: #000;
+      --muted: rgba(0, 0, 0, 0.4);
+      --border: #000;
+      --panel-bg: rgba(255, 255, 255, 0.92);
+      --accent: #0f62fe;
+      --stage-bg: #1a1a1a;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 400;
+      color: var(--fg);
+      background: var(--stage-bg);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* === STAGE === */
+    #stage {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--stage-bg);
+      overflow: hidden;
+    }
+
+    #canvas-3d {
+      position: relative;
+      max-width: 90vw;
+      max-height: 90vh;
+      perspective: 1000px;
+      transform-style: preserve-3d;
+      display: none; /* hidden until image loads */
+    }
+    #canvas-3d.has-image { display: block; }
+
+    .layer {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      backface-visibility: hidden;
+      transform-style: preserve-3d;
+      transition: transform 0.05s linear;
+      pointer-events: none;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    #overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+      z-index: 10;
+    }
+
+    #overlay .break-line {
+      stroke: #ffffff;
+      stroke-width: 1.5;
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+      vector-effect: non-scaling-stroke;
+    }
+
+    #overlay .handle {
+      fill: #ffffff;
+      stroke: rgba(0, 0, 0, 0.4);
+      stroke-width: 1;
+      filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.4));
+      cursor: grab;
+      pointer-events: all;
+      transition: r 0.12s ease;
+    }
+    #overlay .handle:hover { fill: var(--accent); }
+    #overlay .handle.dragging { cursor: grabbing; fill: var(--accent); }
+
+    /* === DROPZONE === */
+    #dropzone {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: all;
+      z-index: 5;
+    }
+    #dropzone.hidden { display: none; }
+
+    #dropzone .target {
+      width: 480px;
+      max-width: 80vw;
+      height: 320px;
+      border: 1px dashed rgba(255, 255, 255, 0.3);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      cursor: pointer;
+      transition: border-color 0.16s linear, background 0.16s linear;
+      color: rgba(255, 255, 255, 0.7);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 12px;
+    }
+    #dropzone .target:hover {
+      border-color: rgba(255, 255, 255, 0.7);
+      color: rgba(255, 255, 255, 0.9);
+    }
+    #dropzone .target.drag-over {
+      border-color: var(--accent);
+      border-style: solid;
+      background: rgba(15, 98, 254, 0.08);
+      color: #ffffff;
+    }
+    #dropzone .target .icon {
+      width: 32px;
+      height: 32px;
+      border: 1px solid currentColor;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 500;
+    }
+    #dropzone .target .label {
+      font-weight: 500;
+    }
+    #dropzone .target .hint {
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      opacity: 0.7;
+    }
+
+    /* === UI PANEL === */
+    #ui {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      width: 272px;
+      background: var(--panel-bg);
+      backdrop-filter: blur(10px) saturate(120%);
+      -webkit-backdrop-filter: blur(10px) saturate(120%);
+      border: 1px solid var(--border);
+      padding: 16px 16px 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      line-height: 1.2;
+      user-select: none;
+      z-index: 100;
+    }
+
+    #ui .title {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-weight: 600;
+      font-size: 10px;
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    #ui .title .muted { font-weight: 400; color: var(--muted); }
+
+    #ui .group {
+      margin-bottom: 14px;
+    }
+
+    #ui .group-label {
+      font-size: 9px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #ui .group-label::before {
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 1px;
+      background: var(--muted);
+    }
+
+    #ui .row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    #ui .row label {
+      flex: 0 0 60px;
+      font-size: 10px;
+    }
+    #ui .row .value {
+      flex: 0 0 40px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-size: 10px;
+    }
+
+    #ui input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 1px;
+      background: #000;
+      outline: none;
+      margin: 0;
+      padding: 0;
+    }
+    #ui input[type="range"]::-webkit-slider-runnable-track {
+      height: 1px;
+      background: #000;
+    }
+    #ui input[type="range"]::-moz-range-track {
+      height: 1px;
+      background: #000;
+    }
+    #ui input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 10px;
+      height: 10px;
+      background: #000;
+      cursor: pointer;
+      border: none;
+      margin-top: -4.5px;
+      border-radius: 0;
+    }
+    #ui input[type="range"]::-moz-range-thumb {
+      width: 10px;
+      height: 10px;
+      background: #000;
+      cursor: pointer;
+      border: none;
+      border-radius: 0;
+    }
+
+    #ui button {
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 7px 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--fg);
+      cursor: pointer;
+      transition: background 0.12s linear, color 0.12s linear;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #ui button:hover {
+      background: #000;
+      color: #fff;
+    }
+
+    #ui .full-btn {
+      display: block;
+      width: 100%;
+      margin-top: 6px;
+      padding: 9px;
+    }
+    #ui .full-btn:first-of-type { margin-top: 0; }
+
+    #ui .full-btn.primary {
+      background: #000;
+      color: #fff;
+    }
+    #ui .full-btn.primary:hover {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    #ui .hint {
+      font-size: 8px;
+      color: var(--muted);
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(0, 0, 0, 0.1);
+      text-align: center;
+    }
+
+    #ui .filename {
+      display: block;
+      width: 100%;
+      padding: 5px 8px;
+      margin-top: 6px;
+      border: 1px solid rgba(0, 0, 0, 0.2);
+      background: rgba(0, 0, 0, 0.04);
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      color: rgba(0, 0, 0, 0.6);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #file-input { display: none; }
+  </style>
+</head>
+<body>
+  <!-- UI PANEL -->
+  <div id="ui">
+    <div class="title">
+      <span>Image · Fold</span>
+      <span class="muted">v1</span>
+    </div>
+
+    <div class="group">
+      <div class="group-label">Image</div>
+      <button class="full-btn" id="ctl-upload">Upload Image</button>
+      <div class="filename" id="filename" style="display: none;">—</div>
+    </div>
+
+    <div class="group">
+      <div class="group-label">Fold</div>
+      <div class="row">
+        <label>Angle</label>
+        <input type="range" id="ctl-angle" min="0" max="80" step="1" value="30">
+        <span class="value" id="val-angle">30°</span>
+      </div>
+      <div class="row">
+        <label>Depth</label>
+        <input type="range" id="ctl-depth" min="400" max="2000" step="50" value="1000">
+        <span class="value" id="val-depth">1000</span>
+      </div>
+    </div>
+
+    <div class="group">
+      <div class="group-label">Line</div>
+      <button class="full-btn" id="ctl-reset-line">Reset Line</button>
+    </div>
+
+    <button class="full-btn" id="ctl-reset">Reset All</button>
+    <button class="full-btn primary" id="ctl-export">Export SVG</button>
+
+    <div class="hint">Drag handles · Drop image</div>
+  </div>
+
+  <!-- STAGE -->
+  <div id="stage">
+    <div id="canvas-3d">
+      <img class="layer top" id="layer-top" alt="">
+      <img class="layer bottom" id="layer-bottom" alt="">
+      <svg id="overlay" preserveAspectRatio="none" viewBox="0 0 100 100">
+        <line class="break-line" id="break-line" x1="25" y1="50" x2="75" y2="50" />
+        <circle class="handle" id="handle-a" data-point="a" cx="25" cy="50" r="1.2" />
+        <circle class="handle" id="handle-b" data-point="b" cx="75" cy="50" r="1.2" />
+      </svg>
+    </div>
+
+    <div id="dropzone">
+      <div class="target" id="dropzone-target">
+        <div class="icon">+</div>
+        <div class="label">Drop image or click</div>
+        <div class="hint">PNG · JPG · WebP · SVG</div>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept="image/*">
+
+  <script>
+    // ============================================================
+    // STATE
+    // ============================================================
+    const DEFAULTS = Object.freeze({
+      pointA: { x: 0.25, y: 0.5 },
+      pointB: { x: 0.75, y: 0.5 },
+      angle: 30,
+      perspective: 1000,
+    });
+
+    const state = {
+      imageSrc: null,
+      imageW: 0,
+      imageH: 0,
+      filename: null,
+      pointA: { ...DEFAULTS.pointA },
+      pointB: { ...DEFAULTS.pointB },
+      angle: DEFAULTS.angle,
+      perspective: DEFAULTS.perspective,
+    };
+
+    // ============================================================
+    // DOM REFS
+    // ============================================================
+    const stageEl = document.getElementById('stage');
+    const canvas3d = document.getElementById('canvas-3d');
+    const layerTop = document.getElementById('layer-top');
+    const layerBottom = document.getElementById('layer-bottom');
+    const overlay = document.getElementById('overlay');
+    const breakLine = document.getElementById('break-line');
+    const handleA = document.getElementById('handle-a');
+    const handleB = document.getElementById('handle-b');
+    const dropzone = document.getElementById('dropzone');
+    const dropzoneTarget = document.getElementById('dropzone-target');
+    const fileInput = document.getElementById('file-input');
+
+    // UI controls
+    const ctlAngle = document.getElementById('ctl-angle');
+    const ctlDepth = document.getElementById('ctl-depth');
+    const valAngle = document.getElementById('val-angle');
+    const valDepth = document.getElementById('val-depth');
+    const filenameEl = document.getElementById('filename');
+
+    // ============================================================
+    // GEOMETRY HELPERS
+    // ============================================================
+
+    // Returns the normalized axis direction for the line, oriented so that
+    // the right-hand-perpendicular points "down" (positive y in canvas).
+    // This way the math for top/bottom rotation signs is consistent.
+    function axis() {
+      let dx = state.pointB.x - state.pointA.x;
+      let dy = state.pointB.y - state.pointA.y;
+      const len = Math.hypot(dx, dy) || 1;
+      let ux = dx / len;
+      let uy = dy / len;
+      // Orient so perpendicular (-uy, ux) points down (uy >= 0 means perp.y = ux)
+      // Want perp.y >= 0, i.e. ux >= 0. If not, flip.
+      if (ux < 0 || (ux === 0 && uy < 0)) {
+        ux = -ux;
+        uy = -uy;
+      }
+      return { ux, uy };
+    }
+
+    // Cross product sign of (P - A) × (B - A) — tells us which side of the line a point is on.
+    // Positive = right side relative to A→B direction.
+    function sideOfLine(px, py, ax, ay, bx, by) {
+      return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    }
+
+    // ============================================================
+    // UPDATE
+    // ============================================================
+    function update() {
+      const { x: ax, y: ay } = state.pointA;
+      const { x: bx, y: by } = state.pointB;
+
+      // Clip paths in % of the canvas-3d element.
+      // The line splits the canvas into two halves. We need polygons that
+      // include all four corners + the line endpoints, ordered correctly.
+      // We compute which canvas corners belong to "top" (above/right of line)
+      // vs "bottom" (below/left) using the side-of-line test.
+      const corners = [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+        { x: 0, y: 1 },
+      ];
+
+      // Use a consistent orientation: axis A→B normalized, perpendicular points "down-right".
+      // Side > 0 means corner is on positive perpendicular side (we'll call this "bottom" half).
+      const cornerSides = corners.map(c => sideOfLine(c.x, c.y, ax, ay, bx, by));
+
+      // Split corners into top (negative side) and bottom (positive side), preserving order.
+      const topPolyPoints = [];
+      const bottomPolyPoints = [];
+      for (let i = 0; i < 4; i++) {
+        const next = (i + 1) % 4;
+        const c = corners[i];
+        const cn = corners[next];
+        const s = cornerSides[i];
+        const sn = cornerSides[next];
+
+        // Add current corner to the side it belongs to
+        if (s <= 0) topPolyPoints.push(c);
+        if (s >= 0) bottomPolyPoints.push(c);
+
+        // If edge crosses the line, find intersection and add to both
+        if (s * sn < 0) {
+          // Edge from c to cn crosses the line. Compute intersection with line A→B.
+          const inter = lineIntersect(c, cn, state.pointA, state.pointB);
+          if (inter) {
+            topPolyPoints.push(inter);
+            bottomPolyPoints.push(inter);
+          }
+        }
+      }
+
+      const polyToCSS = pts => 'polygon(' + pts.map(p => `${p.x * 100}% ${p.y * 100}%`).join(', ') + ')';
+      layerTop.style.clipPath = polyToCSS(topPolyPoints);
+      layerBottom.style.clipPath = polyToCSS(bottomPolyPoints);
+
+      // Transform origin at line midpoint
+      const midX = (ax + bx) / 2;
+      const midY = (ay + by) / 2;
+      const tof = `${midX * 100}% ${midY * 100}%`;
+      layerTop.style.transformOrigin = tof;
+      layerBottom.style.transformOrigin = tof;
+
+      // Rotate3d around the line axis
+      const { ux, uy } = axis();
+      // Top half (negative perpendicular side): rotate -angle to fold toward viewer
+      // Bottom half (positive perpendicular side): rotate +angle to fold toward viewer
+      layerTop.style.transform = `rotate3d(${ux}, ${uy}, 0, ${-state.angle}deg)`;
+      layerBottom.style.transform = `rotate3d(${ux}, ${uy}, 0, ${state.angle}deg)`;
+
+      // Perspective on the parent
+      canvas3d.style.perspective = `${state.perspective}px`;
+
+      // Update SVG overlay (line + handles)
+      breakLine.setAttribute('x1', ax * 100);
+      breakLine.setAttribute('y1', ay * 100);
+      breakLine.setAttribute('x2', bx * 100);
+      breakLine.setAttribute('y2', by * 100);
+      handleA.setAttribute('cx', ax * 100);
+      handleA.setAttribute('cy', ay * 100);
+      handleB.setAttribute('cx', bx * 100);
+      handleB.setAttribute('cy', by * 100);
+
+      // UI labels
+      valAngle.textContent = state.angle + '°';
+      valDepth.textContent = state.perspective;
+      ctlAngle.value = state.angle;
+      ctlDepth.value = state.perspective;
+    }
+
+    // Line segment intersection: returns intersection point of segment (a,b)
+    // with the infinite line through (c,d). Returns null if parallel.
+    function lineIntersect(a, b, c, d) {
+      const x1 = a.x, y1 = a.y;
+      const x2 = b.x, y2 = b.y;
+      const x3 = c.x, y3 = c.y;
+      const x4 = d.x, y4 = d.y;
+      const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+      if (Math.abs(denom) < 1e-9) return null;
+      const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+      return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) };
+    }
+
+    // ============================================================
+    // CANVAS SIZING (keep image aspect)
+    // ============================================================
+    function fitCanvas() {
+      if (!state.imageW || !state.imageH) return;
+      const rect = stageEl.getBoundingClientRect();
+      const aspect = state.imageW / state.imageH;
+      const containerAspect = rect.width / rect.height;
+      let w, h;
+      if (aspect > containerAspect) {
+        w = rect.width * 0.85;
+        h = w / aspect;
+      } else {
+        h = rect.height * 0.85;
+        w = h * aspect;
+      }
+      canvas3d.style.width = w + 'px';
+      canvas3d.style.height = h + 'px';
+    }
+
+    window.addEventListener('resize', fitCanvas);
+
+    // ============================================================
+    // IMAGE UPLOAD
+    // ============================================================
+    function loadImageFromFile(file) {
+      if (!file || !file.type.startsWith('image/')) return;
+      state.filename = file.name;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const dataUrl = e.target.result;
+        state.imageSrc = dataUrl;
+        const img = new Image();
+        img.onload = () => {
+          state.imageW = img.naturalWidth;
+          state.imageH = img.naturalHeight;
+          layerTop.src = dataUrl;
+          layerBottom.src = dataUrl;
+          canvas3d.classList.add('has-image');
+          dropzone.classList.add('hidden');
+          filenameEl.style.display = 'block';
+          filenameEl.textContent = file.name;
+          fitCanvas();
+          update();
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Drop zone events
+    dropzoneTarget.addEventListener('click', () => fileInput.click());
+    dropzoneTarget.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzoneTarget.classList.add('drag-over');
+    });
+    dropzoneTarget.addEventListener('dragleave', () => dropzoneTarget.classList.remove('drag-over'));
+    dropzoneTarget.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzoneTarget.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) loadImageFromFile(file);
+    });
+
+    // Whole-window drag to drop (so users can drop anywhere)
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) loadImageFromFile(file);
+    });
+
+    // Upload button + file input
+    document.getElementById('ctl-upload').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      if (file) loadImageFromFile(file);
+      fileInput.value = '';
+    });
+
+    // ============================================================
+    // DRAGGABLE HANDLES
+    // ============================================================
+    const drag = { active: null, pointerId: null };
+
+    function handlePointerToCanvas(e) {
+      const rect = canvas3d.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = (e.clientY - rect.top) / rect.height;
+      // Clamp gently — allow handles to go slightly past edges for flexibility
+      return {
+        x: Math.max(-0.05, Math.min(1.05, x)),
+        y: Math.max(-0.05, Math.min(1.05, y)),
+      };
+    }
+
+    function startDrag(e, point) {
+      e.preventDefault();
+      drag.active = point;
+      drag.pointerId = e.pointerId;
+      const handle = point === 'a' ? handleA : handleB;
+      handle.classList.add('dragging');
+      handle.setPointerCapture(e.pointerId);
+    }
+
+    function moveDrag(e) {
+      if (!drag.active) return;
+      const pos = handlePointerToCanvas(e);
+      if (drag.active === 'a') state.pointA = pos;
+      else state.pointB = pos;
+      update();
+    }
+
+    function endDrag(e) {
+      if (!drag.active) return;
+      const handle = drag.active === 'a' ? handleA : handleB;
+      handle.classList.remove('dragging');
+      try { handle.releasePointerCapture(drag.pointerId); } catch (_) {}
+      drag.active = null;
+      drag.pointerId = null;
+    }
+
+    handleA.addEventListener('pointerdown', (e) => startDrag(e, 'a'));
+    handleB.addEventListener('pointerdown', (e) => startDrag(e, 'b'));
+    handleA.addEventListener('pointermove', moveDrag);
+    handleB.addEventListener('pointermove', moveDrag);
+    handleA.addEventListener('pointerup', endDrag);
+    handleB.addEventListener('pointerup', endDrag);
+    handleA.addEventListener('pointercancel', endDrag);
+    handleB.addEventListener('pointercancel', endDrag);
+
+    // ============================================================
+    // CONTROLS
+    // ============================================================
+    ctlAngle.addEventListener('input', (e) => {
+      state.angle = parseFloat(e.target.value);
+      update();
+    });
+    ctlDepth.addEventListener('input', (e) => {
+      state.perspective = parseFloat(e.target.value);
+      update();
+    });
+
+    document.getElementById('ctl-reset-line').addEventListener('click', () => {
+      state.pointA = { ...DEFAULTS.pointA };
+      state.pointB = { ...DEFAULTS.pointB };
+      update();
+    });
+
+    document.getElementById('ctl-reset').addEventListener('click', () => {
+      Object.assign(state, {
+        pointA: { ...DEFAULTS.pointA },
+        pointB: { ...DEFAULTS.pointB },
+        angle: DEFAULTS.angle,
+        perspective: DEFAULTS.perspective,
+      });
+      update();
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      switch (e.key.toLowerCase()) {
+        case 'r':
+          state.pointA = { ...DEFAULTS.pointA };
+          state.pointB = { ...DEFAULTS.pointB };
+          state.angle = DEFAULTS.angle;
+          state.perspective = DEFAULTS.perspective;
+          update();
+          break;
+        case 'e':
+          if (state.imageSrc) exportSVG();
+          break;
+      }
+    });
+
+    // ============================================================
+    // SVG EXPORT — mesh triangulation
+    // ============================================================
+    document.getElementById('ctl-export').addEventListener('click', () => {
+      if (!state.imageSrc) return;
+      exportSVG();
+    });
+
+    /**
+     * 3D rotation around an arbitrary axis using Rodrigues' formula.
+     * axis = (ux, uy, 0), angle in radians.
+     */
+    function rotateAroundAxis(p, ux, uy, theta) {
+      const c = Math.cos(theta);
+      const s = Math.sin(theta);
+      const t = 1 - c;
+      // Rodrigues' rotation matrix for axis (ux, uy, 0):
+      //   [ c+ux²·t      ux·uy·t     uy·s ]
+      //   [ ux·uy·t      c+uy²·t    -ux·s ]
+      //   [ -uy·s        ux·s        c    ]
+      const x = (c + ux * ux * t) * p.x + (ux * uy * t) * p.y + (uy * s) * p.z;
+      const y = (ux * uy * t) * p.x + (c + uy * uy * t) * p.y + (-ux * s) * p.z;
+      const z = (-uy * s) * p.x + (ux * s) * p.y + c * p.z;
+      return { x, y, z };
+    }
+
+    /**
+     * Compute the 2D screen position of a point in canvas-3d local coordinates,
+     * after applying the rotation for one of the halves and the perspective projection.
+     *
+     * Inputs: local (cx, cy) in pixel coords (range [0, W] × [0, H]).
+     * halfSign: +1 for bottom half, -1 for top half.
+     * Returns 2D screen coord in canvas-3d pixel space.
+     */
+    function projectPoint(cx, cy, halfSign, W, H, originX, originY, ux, uy, angleRad, P) {
+      // Translate so transform origin is at 0
+      const lx = cx - originX;
+      const ly = cy - originY;
+      const lz = 0;
+      // Rotate
+      const r = rotateAroundAxis({ x: lx, y: ly, z: lz }, ux, uy, halfSign * angleRad);
+      // Translate back
+      const wx = r.x + originX;
+      const wy = r.y + originY;
+      const wz = r.z;
+      // Perspective projection (perspective-origin = center of canvas)
+      const POx = W / 2;
+      const POy = H / 2;
+      const f = P / (P - wz);
+      return {
+        x: POx + (wx - POx) * f,
+        y: POy + (wy - POy) * f,
+      };
+    }
+
+    /**
+     * Compute the 2x3 affine matrix that maps source triangle (u0,v0)(u1,v1)(u2,v2)
+     * to destination triangle (x0,y0)(x1,y1)(x2,y2).
+     * Returns [a, b, c, d, e, f] for SVG matrix(a,b,c,d,e,f) where
+     *   x' = a·u + c·v + e
+     *   y' = b·u + d·v + f
+     */
+    function computeAffine(u0, v0, u1, v1, u2, v2, x0, y0, x1, y1, x2, y2) {
+      const du1 = u1 - u0, dv1 = v1 - v0;
+      const du2 = u2 - u0, dv2 = v2 - v0;
+      const dx1 = x1 - x0, dy1 = y1 - y0;
+      const dx2 = x2 - x0, dy2 = y2 - y0;
+      const det = du1 * dv2 - du2 * dv1;
+      if (Math.abs(det) < 1e-9) return null;
+      const inv = 1 / det;
+      // Linear part: A = [dx1 dx2; dy1 dy2] · inv([du1 du2; dv1 dv2])
+      // inv of 2x2: 1/det · [dv2 -du2; -dv1 du1]
+      const a = (dx1 * dv2 - dx2 * dv1) * inv;
+      const c = (-dx1 * du2 + dx2 * du1) * inv;
+      const b = (dy1 * dv2 - dy2 * dv1) * inv;
+      const d = (-dy1 * du2 + dy2 * du1) * inv;
+      const e = x0 - a * u0 - c * v0;
+      const f = y0 - b * u0 - d * v0;
+      return [a, b, c, d, e, f];
+    }
+
+    function exportSVG() {
+      const W = canvas3d.clientWidth;
+      const H = canvas3d.clientHeight;
+      const { ux, uy } = axis();
+      const angleRad = state.angle * Math.PI / 180;
+      const P = state.perspective;
+
+      // Origin of transform = line midpoint (in pixel coords)
+      const originX = ((state.pointA.x + state.pointB.x) / 2) * W;
+      const originY = ((state.pointA.y + state.pointB.y) / 2) * H;
+
+      // Mesh density (per half)
+      const N = 16;
+
+      // For each half: build a mesh of (N+1) × (N+1) points, parameterized in
+      // canvas pixel space. Each point has source UV = its own pixel coord.
+      // For each point: project to 2D and store both source and destination.
+      const halves = [
+        { sign: -1, cornerTest: (s) => s <= 0 }, // top half (negative side of line)
+        { sign: +1, cornerTest: (s) => s >= 0 }, // bottom half (positive side)
+      ];
+
+      // Compute clipping polygon for each half (in canvas pixel coords)
+      const corners = [
+        { x: 0, y: 0 },
+        { x: W, y: 0 },
+        { x: W, y: H },
+        { x: 0, y: H },
+      ];
+      const Apx = { x: state.pointA.x * W, y: state.pointA.y * H };
+      const Bpx = { x: state.pointB.x * W, y: state.pointB.y * H };
+      const cornerSides = corners.map(c => sideOfLine(c.x, c.y, Apx.x, Apx.y, Bpx.x, Bpx.y));
+
+      const halfPolygons = halves.map((half) => {
+        const pts = [];
+        for (let i = 0; i < 4; i++) {
+          const next = (i + 1) % 4;
+          const c = corners[i];
+          const cn = corners[next];
+          const s = cornerSides[i];
+          const sn = cornerSides[next];
+          if (half.cornerTest(s)) pts.push(c);
+          if (s * sn < 0) {
+            const inter = lineIntersect(c, cn, Apx, Bpx);
+            if (inter) pts.push(inter);
+          }
+        }
+        return pts;
+      });
+
+      // Compute bounding box in destination space (post-projection) to size the SVG
+      const allDests = [];
+      const halfDests = halves.map((half) => {
+        const dest = [];
+        // Sample mesh points across the whole canvas, then triangulate within each half's polygon
+        // For simplicity: use a regular grid for source, project each point. Triangles
+        // are emitted only if their centroid is inside the half's polygon.
+        for (let iy = 0; iy <= N; iy++) {
+          for (let ix = 0; ix <= N; ix++) {
+            const u = (ix / N) * W;
+            const v = (iy / N) * H;
+            const projected = projectPoint(u, v, half.sign, W, H, originX, originY, ux, uy, angleRad, P);
+            dest.push({ u, v, x: projected.x, y: projected.y });
+            allDests.push(projected);
+          }
+        }
+        return dest;
+      });
+
+      // Bounding box (with some padding)
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of allDests) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      const pad = 20;
+      minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+      const svgW = maxX - minX;
+      const svgH = maxY - minY;
+
+      // Helper: test if a point (px, py) is inside polygon (array of {x, y})
+      function pointInPoly(px, py, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const xi = poly[i].x, yi = poly[i].y;
+          const xj = poly[j].x, yj = poly[j].y;
+          const intersect = ((yi > py) !== (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      }
+
+      // Build SVG
+      const svgParts = [];
+      svgParts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="${minX} ${minY} ${svgW} ${svgH}">`);
+      svgParts.push(`<defs>`);
+      // We embed the source image once and reference it by id
+      svgParts.push(`<image id="src" href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" />`);
+
+      // For each half: emit triangles
+      let triCount = 0;
+      const halfTriangles = halves.map((half, halfIdx) => {
+        const dest = halfDests[halfIdx];
+        const poly = halfPolygons[halfIdx];
+        const tris = [];
+        for (let iy = 0; iy < N; iy++) {
+          for (let ix = 0; ix < N; ix++) {
+            const i00 = iy * (N + 1) + ix;
+            const i10 = i00 + 1;
+            const i01 = i00 + (N + 1);
+            const i11 = i01 + 1;
+            const p00 = dest[i00];
+            const p10 = dest[i10];
+            const p01 = dest[i01];
+            const p11 = dest[i11];
+
+            // Two triangles per cell
+            // Triangle 1: 00, 10, 11
+            // Triangle 2: 00, 11, 01
+            const t1 = [p00, p10, p11];
+            const t2 = [p00, p11, p01];
+
+            for (const tri of [t1, t2]) {
+              // Centroid test (in source space) — only emit if centroid is inside half polygon
+              const centroidU = (tri[0].u + tri[1].u + tri[2].u) / 3;
+              const centroidV = (tri[0].v + tri[1].v + tri[2].v) / 3;
+              if (pointInPoly(centroidU, centroidV, poly)) {
+                tris.push(tri);
+              }
+            }
+          }
+        }
+        return tris;
+      });
+
+      // Emit clipPath defs
+      let triId = 0;
+      const triEntries = [];
+      for (let halfIdx = 0; halfIdx < halves.length; halfIdx++) {
+        for (const tri of halfTriangles[halfIdx]) {
+          const id = `tri${triId++}`;
+          // Source-space clip polygon
+          const clipPath = `<clipPath id="${id}-clip" clipPathUnits="userSpaceOnUse"><polygon points="${tri.map(p => `${p.u},${p.v}`).join(' ')}" /></clipPath>`;
+          svgParts.push(clipPath);
+          triEntries.push({ id, tri });
+        }
+      }
+      svgParts.push(`</defs>`);
+
+      // Emit one group per triangle
+      for (const { id, tri } of triEntries) {
+        const m = computeAffine(
+          tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
+          tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
+        );
+        if (!m) continue;
+        const matrix = `matrix(${m.map(n => n.toFixed(4)).join(' ')})`;
+        // Apply transform to a clipped image
+        svgParts.push(`<g transform="${matrix}"><image href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" clip-path="url(#${id}-clip)" preserveAspectRatio="none" /></g>`);
+      }
+
+      // Optional: include the line + handles as overlay (commented by default to keep export clean)
+      // Uncomment if you want them in the SVG too.
+
+      svgParts.push(`</svg>`);
+      const svg = svgParts.join('\n');
+
+      // Trigger download
+      const blob = new Blob([svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `image-fold-${Date.now()}.svg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+    update();
+  </script>
+</body>
+</html>
