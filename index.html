@@ -893,7 +893,7 @@
      *   (1) fold rotation around line axis (transform-origin = line midpoint)
      *   (2) orbit rotation around canvas center (rotateY then rotateX)
      *   (3) CSS perspective projection (perspective-origin = canvas center)
-     * Returns 2D screen position in canvas-3d pixel space.
+     * Returns { x, y, z } where z is the post-orbit depth (used for back-to-front sort).
      */
     function projectPointFull(cx, cy, halfSign, params) {
       const { W, H, originX, originY, ux, uy, angleRad, P, orbitXRad, orbitYRad } = params;
@@ -907,17 +907,22 @@
       // --- (2) Orbit around canvas center ---
       const cX = W / 2, cY = H / 2;
       let q = { x: p.x - cX, y: p.y - cY, z: p.z };
-      // CSS transform "rotateX(a) rotateY(b)" applies rotateY first to the local point, then rotateX
       q = rotateY(q, orbitYRad);
       q = rotateX(q, orbitXRad);
       q.x += cX;
       q.y += cY;
 
+      // Clamp z to avoid points crossing the camera plane (which would make
+      // perspective explode or invert). Anything past P*0.95 gets pinned.
+      const maxZ = P * 0.95;
+      const zClamped = Math.min(q.z, maxZ);
+
       // --- (3) Perspective projection ---
-      const f = P / (P - q.z);
+      const f = P / (P - zClamped);
       return {
         x: cX + (q.x - cX) * f,
         y: cY + (q.y - cY) * f,
+        z: q.z,  // unclamped z for sort purposes
       };
     }
 
@@ -961,6 +966,9 @@
     function buildExportMesh(N) {
       const W = canvas3d.clientWidth;
       const H = canvas3d.clientHeight;
+      if (W < 1 || H < 1 || !state.imageW || !state.imageH) {
+        return { triangles: [], bbox: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
+      }
       const { ux, uy } = axis();
       const angleRad = state.angle * Math.PI / 180;
       const P = state.perspective;
@@ -1005,7 +1013,7 @@
             const u = (ix / N) * W;
             const v = (iy / N) * H;
             const projected = projectPointFull(u, v, half.sign, params);
-            dest.push({ u, v, x: projected.x, y: projected.y });
+            dest.push({ u, v, x: projected.x, y: projected.y, z: projected.z });
           }
         }
         return dest;
@@ -1029,13 +1037,22 @@
             for (const tri of candidates) {
               const cu = (tri[0].u + tri[1].u + tri[2].u) / 3;
               const cv = (tri[0].v + tri[1].v + tri[2].v) / 3;
-              if (pointInPoly(cu, cv, poly)) triangles.push(tri);
+              if (pointInPoly(cu, cv, poly)) {
+                // Avg z for back-to-front sort
+                tri.avgZ = (tri[0].z + tri[1].z + tri[2].z) / 3;
+                triangles.push(tri);
+              }
             }
           }
         }
       }
 
-      // Convert source UVs from canvas pixel space to image pixel space
+      // Sort back-to-front (smallest z first = farthest from camera).
+      // CSS +Z is toward viewer; smaller z = farther = drawn first.
+      triangles.sort((a, b) => a.avgZ - b.avgZ);
+
+      // Convert source UVs from canvas pixel space to image pixel space (do AFTER
+      // the centroid test, which uses canvas-pixel-space half polygons).
       const scaleU = state.imageW / W;
       const scaleV = state.imageH / H;
       for (const tri of triangles) {
@@ -1055,109 +1072,188 @@
           if (p.y > maxY) maxY = p.y;
         }
       }
+      if (!isFinite(minX)) {
+        // No triangles emitted (e.g. degenerate line)
+        return { triangles: [], bbox: { minX: 0, minY: 0, maxX: W, maxY: H } };
+      }
       return { triangles, bbox: { minX, minY, maxX, maxY } };
     }
 
-    function exportSVG() {
-      const { triangles, bbox } = buildExportMesh(16);
-      const pad = 20;
-      const minX = bbox.minX - pad, minY = bbox.minY - pad;
-      const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
-      const svgW = maxX - minX, svgH = maxY - minY;
-
-      const parts = [];
-      parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW.toFixed(2)}" height="${svgH.toFixed(2)}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${svgW.toFixed(2)} ${svgH.toFixed(2)}">`);
-      parts.push(`<defs>`);
-      triangles.forEach((tri, i) => {
-        parts.push(`<clipPath id="t${i}" clipPathUnits="userSpaceOnUse"><polygon points="${tri.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' ')}" /></clipPath>`);
-      });
-      parts.push(`</defs>`);
-      triangles.forEach((tri, i) => {
-        const m = computeAffine(
-          tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
-          tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
-        );
-        if (!m) return;
-        const matrix = `matrix(${m.map(n => n.toFixed(4)).join(' ')})`;
-        parts.push(`<g transform="${matrix}"><image href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" clip-path="url(#t${i})" preserveAspectRatio="none" /></g>`);
-      });
-      parts.push(`</svg>`);
-      const svg = parts.join('\n');
-
-      const blob = new Blob([svg], { type: 'image/svg+xml' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `image-fold-${Date.now()}.svg`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 100);
+    /** Brief flash on a button — gives users feedback that something happened. */
+    function flashBtn(btn, label) {
+      const orig = btn.textContent;
+      btn.textContent = label;
+      btn.disabled = true;
+      setTimeout(() => {
+        btn.textContent = orig;
+        btn.disabled = false;
+      }, 900);
     }
 
-    function exportPNG(scale = 2) {
-      const { triangles, bbox } = buildExportMesh(20);
-      const pad = 20;
-      const minX = bbox.minX - pad, minY = bbox.minY - pad;
-      const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
-      const w = (maxX - minX);
-      const h = (maxY - minY);
+    function exportSVG() {
+      const btn = document.getElementById('ctl-export-svg');
+      try {
+        const { triangles, bbox } = buildExportMesh(16);
+        if (triangles.length === 0) {
+          flashBtn(btn, 'Empty');
+          return;
+        }
+        const pad = 20;
+        const minX = bbox.minX - pad, minY = bbox.minY - pad;
+        const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
+        const svgW = maxX - minX, svgH = maxY - minY;
 
-      // Create canvas at scale × screen resolution
-      const cv = document.createElement('canvas');
-      cv.width = Math.round(w * scale);
-      cv.height = Math.round(h * scale);
-      const ctx = cv.getContext('2d');
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-
-      // Translate so bbox.minX/Y maps to 0 in canvas, scale to scale factor
-      ctx.scale(scale, scale);
-      ctx.translate(-minX, -minY);
-
-      const img = new Image();
-      img.onload = () => {
-        // Draw each triangle: clip to dest triangle, set affine matrix, drawImage(img, 0, 0, srcW, srcH)
-        // The matrix is constructed so that source (u, v) maps to destination (x, y).
-        for (const tri of triangles) {
+        const parts = [];
+        parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW.toFixed(2)}" height="${svgH.toFixed(2)}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${svgW.toFixed(2)} ${svgH.toFixed(2)}">`);
+        parts.push(`<defs>`);
+        triangles.forEach((tri, i) => {
+          parts.push(`<clipPath id="t${i}" clipPathUnits="userSpaceOnUse"><polygon points="${tri.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' ')}" /></clipPath>`);
+        });
+        parts.push(`</defs>`);
+        triangles.forEach((tri, i) => {
           const m = computeAffine(
             tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
             tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
           );
-          if (!m) continue;
-          ctx.save();
-          // Clip to destination triangle (so neighbours don't overdraw past their share)
-          ctx.beginPath();
-          ctx.moveTo(tri[0].x, tri[0].y);
-          ctx.lineTo(tri[1].x, tri[1].y);
-          ctx.lineTo(tri[2].x, tri[2].y);
-          ctx.closePath();
-          ctx.clip();
-          // Apply the source-to-destination affine
-          ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-          ctx.drawImage(img, 0, 0, state.imageW, state.imageH);
-          ctx.restore();
+          if (!m) return;
+          const matrix = `matrix(${m.map(n => n.toFixed(4)).join(' ')})`;
+          parts.push(`<g transform="${matrix}"><image href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" clip-path="url(#t${i})" preserveAspectRatio="none" /></g>`);
+        });
+        parts.push(`</svg>`);
+        const svg = parts.join('\n');
+
+        const blob = new Blob([svg], { type: 'image/svg+xml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `image-fold-${Date.now()}.svg`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+        flashBtn(btn, 'Saved ✓');
+      } catch (err) {
+        console.error('SVG export failed:', err);
+        flashBtn(btn, 'Error');
+      }
+    }
+
+    function exportPNG(scale = 2) {
+      const btn = document.getElementById('ctl-export-png');
+      try {
+        const { triangles, bbox } = buildExportMesh(20);
+        if (triangles.length === 0) {
+          flashBtn(btn, 'Empty');
+          return;
         }
-        // Trigger download
-        cv.toBlob((blob) => {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `image-fold-${Date.now()}.png`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 100);
-        }, 'image/png');
-      };
-      img.src = state.imageSrc;
+        const pad = 20;
+        const minX = bbox.minX - pad, minY = bbox.minY - pad;
+        const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
+        let w = maxX - minX;
+        let h = maxY - minY;
+        if (w < 1 || h < 1 || !isFinite(w) || !isFinite(h)) {
+          console.warn('Invalid mesh bbox', bbox);
+          flashBtn(btn, 'Empty');
+          return;
+        }
+
+        // Clamp to a max canvas dimension to avoid silent browser failures
+        // (browsers cap canvas around 16k–32k; we stay well under).
+        const MAX_DIM = 4096;
+        let s = scale;
+        const dimAfterScale = Math.max(w * s, h * s);
+        if (dimAfterScale > MAX_DIM) {
+          s = MAX_DIM / Math.max(w, h);
+        }
+
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.round(w * s));
+        cv.height = Math.max(1, Math.round(h * s));
+        const ctx = cv.getContext('2d');
+        if (!ctx) {
+          flashBtn(btn, 'Error');
+          return;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.scale(s, s);
+        ctx.translate(-minX, -minY);
+
+        const img = new Image();
+        img.onload = () => {
+          try {
+            // Triangles are already sorted back-to-front by buildExportMesh
+            for (const tri of triangles) {
+              const m = computeAffine(
+                tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
+                tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
+              );
+              if (!m) continue;
+              ctx.save();
+              ctx.beginPath();
+              ctx.moveTo(tri[0].x, tri[0].y);
+              ctx.lineTo(tri[1].x, tri[1].y);
+              ctx.lineTo(tri[2].x, tri[2].y);
+              ctx.closePath();
+              ctx.clip();
+              ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+              ctx.drawImage(img, 0, 0, state.imageW, state.imageH);
+              ctx.restore();
+            }
+            // toBlob + fallback to toDataURL if blob fails
+            const triggerDownload = (urlOrBlob, isBlob) => {
+              const url = isBlob ? URL.createObjectURL(urlOrBlob) : urlOrBlob;
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `image-fold-${Date.now()}.png`;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              if (isBlob) setTimeout(() => URL.revokeObjectURL(url), 100);
+              flashBtn(btn, 'Saved ✓');
+            };
+            cv.toBlob((blob) => {
+              if (blob) {
+                triggerDownload(blob, true);
+              } else {
+                // Fallback: data URL (slower for big canvases but reliable)
+                try {
+                  triggerDownload(cv.toDataURL('image/png'), false);
+                } catch (err) {
+                  console.error('PNG export fallback failed:', err);
+                  flashBtn(btn, 'Error');
+                }
+              }
+            }, 'image/png');
+          } catch (err) {
+            console.error('PNG export draw failed:', err);
+            flashBtn(btn, 'Error');
+          }
+        };
+        img.onerror = () => {
+          console.error('PNG export: image failed to load');
+          flashBtn(btn, 'Error');
+        };
+        img.src = state.imageSrc;
+      } catch (err) {
+        console.error('PNG export failed:', err);
+        flashBtn(btn, 'Error');
+      }
     }
 
     document.getElementById('ctl-export-svg').addEventListener('click', () => {
-      if (state.imageSrc) exportSVG();
+      if (!state.imageSrc) {
+        flashBtn(document.getElementById('ctl-export-svg'), 'No image');
+        return;
+      }
+      exportSVG();
     });
     document.getElementById('ctl-export-png').addEventListener('click', () => {
-      if (state.imageSrc) exportPNG(2);
+      if (!state.imageSrc) {
+        flashBtn(document.getElementById('ctl-export-png'), 'No image');
+        return;
+      }
+      exportPNG(2);
     });
 
     // ============================================================
