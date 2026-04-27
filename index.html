@@ -56,6 +56,17 @@
     }
     #canvas-3d.has-image { display: block; }
 
+    /* Wrapper that handles the orbit (view rotation) — children hold the fold */
+    #layers-wrap {
+      position: absolute;
+      inset: 0;
+      transform-style: preserve-3d;
+      cursor: grab;
+      pointer-events: all;
+      will-change: transform;
+    }
+    #layers-wrap:active { cursor: grabbing; }
+
     .layer {
       position: absolute;
       inset: 0;
@@ -64,7 +75,6 @@
       object-fit: fill;
       backface-visibility: hidden;
       transform-style: preserve-3d;
-      transition: transform 0.05s linear;
       pointer-events: none;
       user-select: none;
       -webkit-user-drag: none;
@@ -355,26 +365,36 @@
     </div>
 
     <div class="group">
+      <div class="group-label">View</div>
+      <button class="full-btn" id="ctl-reset-view">Reset View</button>
+    </div>
+
+    <div class="group">
       <div class="group-label">Line</div>
       <button class="full-btn" id="ctl-reset-line">Reset Line</button>
     </div>
 
     <button class="full-btn" id="ctl-reset">Reset All</button>
-    <button class="full-btn primary" id="ctl-export">Export SVG</button>
+    <div class="btn-row" style="display: flex; gap: 4px; margin-top: 6px;">
+      <button class="full-btn" id="ctl-export-svg" style="flex: 1; margin-top: 0;">Export SVG</button>
+      <button class="full-btn primary" id="ctl-export-png" style="flex: 1; margin-top: 0;">Export PNG</button>
+    </div>
 
-    <div class="hint">Drag handles · Drop image</div>
+    <div class="hint">Drag handles · Drag image to orbit · Drop image</div>
   </div>
 
   <!-- STAGE -->
   <div id="stage">
     <div id="canvas-3d">
-      <img class="layer top" id="layer-top" alt="">
-      <img class="layer bottom" id="layer-bottom" alt="">
-      <svg id="overlay" preserveAspectRatio="none" viewBox="0 0 100 100">
-        <line class="break-line" id="break-line" x1="25" y1="50" x2="75" y2="50" />
-        <circle class="handle" id="handle-a" data-point="a" cx="25" cy="50" r="1.2" />
-        <circle class="handle" id="handle-b" data-point="b" cx="75" cy="50" r="1.2" />
-      </svg>
+      <div id="layers-wrap">
+        <img class="layer top" id="layer-top" alt="">
+        <img class="layer bottom" id="layer-bottom" alt="">
+        <svg id="overlay" preserveAspectRatio="none" viewBox="0 0 100 100">
+          <line class="break-line" id="break-line" x1="25" y1="50" x2="75" y2="50" />
+          <circle class="handle" id="handle-a" data-point="a" cx="25" cy="50" r="1.2" />
+          <circle class="handle" id="handle-b" data-point="b" cx="75" cy="50" r="1.2" />
+        </svg>
+      </div>
     </div>
 
     <div id="dropzone">
@@ -397,6 +417,8 @@
       pointB: { x: 0.75, y: 0.5 },
       angle: 30,
       perspective: 1000,
+      orbitX: 0,  // rotation around X axis (vertical drag)
+      orbitY: 0,  // rotation around Y axis (horizontal drag)
     });
 
     const state = {
@@ -408,6 +430,8 @@
       pointB: { ...DEFAULTS.pointB },
       angle: DEFAULTS.angle,
       perspective: DEFAULTS.perspective,
+      orbitX: DEFAULTS.orbitX,
+      orbitY: DEFAULTS.orbitY,
     };
 
     // ============================================================
@@ -415,6 +439,7 @@
     // ============================================================
     const stageEl = document.getElementById('stage');
     const canvas3d = document.getElementById('canvas-3d');
+    const layersWrap = document.getElementById('layers-wrap');
     const layerTop = document.getElementById('layer-top');
     const layerBottom = document.getElementById('layer-bottom');
     const overlay = document.getElementById('overlay');
@@ -466,24 +491,21 @@
     function update() {
       const { x: ax, y: ay } = state.pointA;
       const { x: bx, y: by } = state.pointB;
+      const { ux, uy } = axis();
 
       // Clip paths in % of the canvas-3d element.
-      // The line splits the canvas into two halves. We need polygons that
-      // include all four corners + the line endpoints, ordered correctly.
-      // We compute which canvas corners belong to "top" (above/right of line)
-      // vs "bottom" (below/left) using the side-of-line test.
+      // We compute the polygons for each half (split by the line) and
+      // intentionally OVERLAP them by `overlap` along the line's perpendicular
+      // direction. This eliminates any sub-pixel gap at the seam when the
+      // halves rotate independently in 3D.
       const corners = [
         { x: 0, y: 0 },
         { x: 1, y: 0 },
         { x: 1, y: 1 },
         { x: 0, y: 1 },
       ];
-
-      // Use a consistent orientation: axis A→B normalized, perpendicular points "down-right".
-      // Side > 0 means corner is on positive perpendicular side (we'll call this "bottom" half).
       const cornerSides = corners.map(c => sideOfLine(c.x, c.y, ax, ay, bx, by));
 
-      // Split corners into top (negative side) and bottom (positive side), preserving order.
       const topPolyPoints = [];
       const bottomPolyPoints = [];
       for (let i = 0; i < 4; i++) {
@@ -493,20 +515,31 @@
         const s = cornerSides[i];
         const sn = cornerSides[next];
 
-        // Add current corner to the side it belongs to
-        if (s <= 0) topPolyPoints.push(c);
-        if (s >= 0) bottomPolyPoints.push(c);
+        if (s <= 0) topPolyPoints.push({ x: c.x, y: c.y, onLine: false });
+        if (s >= 0) bottomPolyPoints.push({ x: c.x, y: c.y, onLine: false });
 
-        // If edge crosses the line, find intersection and add to both
         if (s * sn < 0) {
-          // Edge from c to cn crosses the line. Compute intersection with line A→B.
           const inter = lineIntersect(c, cn, state.pointA, state.pointB);
           if (inter) {
-            topPolyPoints.push(inter);
-            bottomPolyPoints.push(inter);
+            topPolyPoints.push({ x: inter.x, y: inter.y, onLine: true });
+            bottomPolyPoints.push({ x: inter.x, y: inter.y, onLine: true });
           }
         }
       }
+
+      // Apply overlap to the on-line points: shift each half's seam outward
+      // into the OTHER half's territory by a tiny amount. With perpendicular
+      // (-uy, ux) pointing toward the bottom side, top extends in +perpendicular
+      // and bottom extends in -perpendicular.
+      const overlap = 0.004; // 0.4% of canvas — enough to hide AA gaps
+      const perpX = -uy * overlap;
+      const perpY = ux * overlap;
+      topPolyPoints.forEach(p => {
+        if (p.onLine) { p.x += perpX; p.y += perpY; }
+      });
+      bottomPolyPoints.forEach(p => {
+        if (p.onLine) { p.x -= perpX; p.y -= perpY; }
+      });
 
       const polyToCSS = pts => 'polygon(' + pts.map(p => `${p.x * 100}% ${p.y * 100}%`).join(', ') + ')';
       layerTop.style.clipPath = polyToCSS(topPolyPoints);
@@ -519,15 +552,17 @@
       layerTop.style.transformOrigin = tof;
       layerBottom.style.transformOrigin = tof;
 
-      // Rotate3d around the line axis
-      const { ux, uy } = axis();
-      // Top half (negative perpendicular side): rotate -angle to fold toward viewer
-      // Bottom half (positive perpendicular side): rotate +angle to fold toward viewer
+      // Fold rotation around the line axis
       layerTop.style.transform = `rotate3d(${ux}, ${uy}, 0, ${-state.angle}deg)`;
       layerBottom.style.transform = `rotate3d(${ux}, ${uy}, 0, ${state.angle}deg)`;
 
       // Perspective on the parent
       canvas3d.style.perspective = `${state.perspective}px`;
+
+      // Apply orbit (view rotation) to the layers-wrap. The SVG overlay is
+      // inside layers-wrap so the line/handles rotate visually with the image,
+      // staying "stuck" to the source.
+      layersWrap.style.transform = `rotateX(${state.orbitX}deg) rotateY(${state.orbitY}deg)`;
 
       // Update SVG overlay (line + handles)
       breakLine.setAttribute('x1', ax * 100);
@@ -681,14 +716,77 @@
       drag.pointerId = null;
     }
 
-    handleA.addEventListener('pointerdown', (e) => startDrag(e, 'a'));
-    handleB.addEventListener('pointerdown', (e) => startDrag(e, 'b'));
+    handleA.addEventListener('pointerdown', (e) => { e.stopPropagation(); startDrag(e, 'a'); });
+    handleB.addEventListener('pointerdown', (e) => { e.stopPropagation(); startDrag(e, 'b'); });
     handleA.addEventListener('pointermove', moveDrag);
     handleB.addEventListener('pointermove', moveDrag);
     handleA.addEventListener('pointerup', endDrag);
     handleB.addEventListener('pointerup', endDrag);
     handleA.addEventListener('pointercancel', endDrag);
     handleB.addEventListener('pointercancel', endDrag);
+
+    // ============================================================
+    // ORBIT DRAG (drag image to rotate the view in 3D)
+    // ============================================================
+    const orbit = { active: false, prevX: 0, prevY: 0, vx: 0, vy: 0, pointerId: null };
+    const ORBIT_DAMPING = 0.92;
+    const ORBIT_SENSITIVITY = 0.5; // degrees per pixel
+    const ORBIT_VELOCITY_EPS = 0.01;
+    const ORBIT_LIMIT = 80; // clamp orbit-x to avoid flipping past horizon
+
+    layersWrap.addEventListener('pointerdown', (e) => {
+      if (drag.active) return;            // handle drag has priority
+      if (!state.imageSrc) return;         // nothing to orbit
+      orbit.active = true;
+      orbit.prevX = e.clientX;
+      orbit.prevY = e.clientY;
+      orbit.vx = 0;
+      orbit.vy = 0;
+      orbit.pointerId = e.pointerId;
+      try { layersWrap.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    layersWrap.addEventListener('pointermove', (e) => {
+      if (!orbit.active) return;
+      const dx = e.clientX - orbit.prevX;
+      const dy = e.clientY - orbit.prevY;
+      orbit.vx = dx * ORBIT_SENSITIVITY;
+      orbit.vy = dy * ORBIT_SENSITIVITY;
+      // Horizontal drag → rotate around Y; vertical drag → rotate around X (inverted)
+      state.orbitY += orbit.vx;
+      state.orbitX = Math.max(-ORBIT_LIMIT, Math.min(ORBIT_LIMIT, state.orbitX - orbit.vy));
+      orbit.prevX = e.clientX;
+      orbit.prevY = e.clientY;
+      update();
+    });
+
+    const endOrbit = (e) => {
+      if (!orbit.active) return;
+      orbit.active = false;
+      try { layersWrap.releasePointerCapture(orbit.pointerId); } catch (_) {}
+      orbit.pointerId = null;
+    };
+    layersWrap.addEventListener('pointerup', endOrbit);
+    layersWrap.addEventListener('pointercancel', endOrbit);
+    layersWrap.addEventListener('pointerleave', endOrbit);
+
+    // Inertia loop — keeps spinning briefly after drag release for natural feel
+    function animate() {
+      requestAnimationFrame(animate);
+      if (!orbit.active) {
+        if (Math.abs(orbit.vx) > ORBIT_VELOCITY_EPS || Math.abs(orbit.vy) > ORBIT_VELOCITY_EPS) {
+          state.orbitY += orbit.vx;
+          state.orbitX = Math.max(-ORBIT_LIMIT, Math.min(ORBIT_LIMIT, state.orbitX - orbit.vy));
+          orbit.vx *= ORBIT_DAMPING;
+          orbit.vy *= ORBIT_DAMPING;
+          update();
+        } else {
+          orbit.vx = 0;
+          orbit.vy = 0;
+        }
+      }
+    }
+    requestAnimationFrame(animate);
 
     // ============================================================
     // CONTROLS
@@ -708,13 +806,25 @@
       update();
     });
 
+    document.getElementById('ctl-reset-view').addEventListener('click', () => {
+      state.orbitX = DEFAULTS.orbitX;
+      state.orbitY = DEFAULTS.orbitY;
+      orbit.vx = 0;
+      orbit.vy = 0;
+      update();
+    });
+
     document.getElementById('ctl-reset').addEventListener('click', () => {
       Object.assign(state, {
         pointA: { ...DEFAULTS.pointA },
         pointB: { ...DEFAULTS.pointB },
         angle: DEFAULTS.angle,
         perspective: DEFAULTS.perspective,
+        orbitX: DEFAULTS.orbitX,
+        orbitY: DEFAULTS.orbitY,
       });
+      orbit.vx = 0;
+      orbit.vy = 0;
       update();
     });
 
@@ -723,80 +833,95 @@
       if (e.target.tagName === 'INPUT') return;
       switch (e.key.toLowerCase()) {
         case 'r':
-          state.pointA = { ...DEFAULTS.pointA };
-          state.pointB = { ...DEFAULTS.pointB };
-          state.angle = DEFAULTS.angle;
-          state.perspective = DEFAULTS.perspective;
+          Object.assign(state, {
+            pointA: { ...DEFAULTS.pointA },
+            pointB: { ...DEFAULTS.pointB },
+            angle: DEFAULTS.angle,
+            perspective: DEFAULTS.perspective,
+            orbitX: DEFAULTS.orbitX,
+            orbitY: DEFAULTS.orbitY,
+          });
+          orbit.vx = 0;
+          orbit.vy = 0;
           update();
           break;
-        case 'e':
+        case 'v':
+          state.orbitX = DEFAULTS.orbitX;
+          state.orbitY = DEFAULTS.orbitY;
+          orbit.vx = 0;
+          orbit.vy = 0;
+          update();
+          break;
+        case 's':
           if (state.imageSrc) exportSVG();
+          break;
+        case 'p':
+          if (state.imageSrc) exportPNG();
           break;
       }
     });
 
     // ============================================================
-    // SVG EXPORT — mesh triangulation
+    // EXPORT — shared mesh + SVG / PNG
     // ============================================================
-    document.getElementById('ctl-export').addEventListener('click', () => {
-      if (!state.imageSrc) return;
-      exportSVG();
-    });
 
-    /**
-     * 3D rotation around an arbitrary axis using Rodrigues' formula.
-     * axis = (ux, uy, 0), angle in radians.
-     */
+    /** 3D rotation around an arbitrary axis (ux, uy, 0) using Rodrigues' formula. */
     function rotateAroundAxis(p, ux, uy, theta) {
       const c = Math.cos(theta);
       const s = Math.sin(theta);
       const t = 1 - c;
-      // Rodrigues' rotation matrix for axis (ux, uy, 0):
-      //   [ c+ux²·t      ux·uy·t     uy·s ]
-      //   [ ux·uy·t      c+uy²·t    -ux·s ]
-      //   [ -uy·s        ux·s        c    ]
       const x = (c + ux * ux * t) * p.x + (ux * uy * t) * p.y + (uy * s) * p.z;
       const y = (ux * uy * t) * p.x + (c + uy * uy * t) * p.y + (-ux * s) * p.z;
       const z = (-uy * s) * p.x + (ux * s) * p.y + c * p.z;
       return { x, y, z };
     }
 
-    /**
-     * Compute the 2D screen position of a point in canvas-3d local coordinates,
-     * after applying the rotation for one of the halves and the perspective projection.
-     *
-     * Inputs: local (cx, cy) in pixel coords (range [0, W] × [0, H]).
-     * halfSign: +1 for bottom half, -1 for top half.
-     * Returns 2D screen coord in canvas-3d pixel space.
-     */
-    function projectPoint(cx, cy, halfSign, W, H, originX, originY, ux, uy, angleRad, P) {
-      // Translate so transform origin is at 0
-      const lx = cx - originX;
-      const ly = cy - originY;
-      const lz = 0;
-      // Rotate
-      const r = rotateAroundAxis({ x: lx, y: ly, z: lz }, ux, uy, halfSign * angleRad);
-      // Translate back
-      const wx = r.x + originX;
-      const wy = r.y + originY;
-      const wz = r.z;
-      // Perspective projection (perspective-origin = center of canvas)
-      const POx = W / 2;
-      const POy = H / 2;
-      const f = P / (P - wz);
-      return {
-        x: POx + (wx - POx) * f,
-        y: POy + (wy - POy) * f,
-      };
+    /** Rotation around X axis by theta (radians). */
+    function rotateX(p, theta) {
+      const c = Math.cos(theta), s = Math.sin(theta);
+      return { x: p.x, y: c * p.y - s * p.z, z: s * p.y + c * p.z };
+    }
+
+    /** Rotation around Y axis by theta (radians). */
+    function rotateY(p, theta) {
+      const c = Math.cos(theta), s = Math.sin(theta);
+      return { x: c * p.x + s * p.z, y: p.y, z: -s * p.x + c * p.z };
     }
 
     /**
-     * Compute the 2x3 affine matrix that maps source triangle (u0,v0)(u1,v1)(u2,v2)
-     * to destination triangle (x0,y0)(x1,y1)(x2,y2).
-     * Returns [a, b, c, d, e, f] for SVG matrix(a,b,c,d,e,f) where
-     *   x' = a·u + c·v + e
-     *   y' = b·u + d·v + f
+     * Project a point (cx, cy) in canvas-local pixel coords through:
+     *   (1) fold rotation around line axis (transform-origin = line midpoint)
+     *   (2) orbit rotation around canvas center (rotateY then rotateX)
+     *   (3) CSS perspective projection (perspective-origin = canvas center)
+     * Returns 2D screen position in canvas-3d pixel space.
      */
+    function projectPointFull(cx, cy, halfSign, params) {
+      const { W, H, originX, originY, ux, uy, angleRad, P, orbitXRad, orbitYRad } = params;
+
+      // --- (1) Fold around line axis ---
+      let p = { x: cx - originX, y: cy - originY, z: 0 };
+      p = rotateAroundAxis(p, ux, uy, halfSign * angleRad);
+      p.x += originX;
+      p.y += originY;
+
+      // --- (2) Orbit around canvas center ---
+      const cX = W / 2, cY = H / 2;
+      let q = { x: p.x - cX, y: p.y - cY, z: p.z };
+      // CSS transform "rotateX(a) rotateY(b)" applies rotateY first to the local point, then rotateX
+      q = rotateY(q, orbitYRad);
+      q = rotateX(q, orbitXRad);
+      q.x += cX;
+      q.y += cY;
+
+      // --- (3) Perspective projection ---
+      const f = P / (P - q.z);
+      return {
+        x: cX + (q.x - cX) * f,
+        y: cY + (q.y - cY) * f,
+      };
+    }
+
+    /** Affine matrix mapping source triangle to destination triangle. Returns [a,b,c,d,e,f]. */
     function computeAffine(u0, v0, u1, v1, u2, v2, x0, y0, x1, y1, x2, y2) {
       const du1 = u1 - u0, dv1 = v1 - v0;
       const du2 = u2 - u0, dv2 = v2 - v0;
@@ -805,8 +930,6 @@
       const det = du1 * dv2 - du2 * dv1;
       if (Math.abs(det) < 1e-9) return null;
       const inv = 1 / det;
-      // Linear part: A = [dx1 dx2; dy1 dy2] · inv([du1 du2; dv1 dv2])
-      // inv of 2x2: 1/det · [dv2 -du2; -dv1 du1]
       const a = (dx1 * dv2 - dx2 * dv1) * inv;
       const c = (-dx1 * du2 + dx2 * du1) * inv;
       const b = (dy1 * dv2 - dy2 * dv1) * inv;
@@ -816,47 +939,55 @@
       return [a, b, c, d, e, f];
     }
 
-    function exportSVG() {
+    /** Point-in-polygon (ray casting). poly is array of {x, y}. */
+    function pointInPoly(px, py, poly) {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        const intersect = ((yi > py) !== (yj > py)) &&
+          (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    /**
+     * Build the triangle mesh for export. Returns:
+     *   { triangles: [[{u,v,x,y},{u,v,x,y},{u,v,x,y}], ...], bbox: {minX,minY,maxX,maxY} }
+     * Each triangle has source UV coords (in image pixel space) and destination XY coords
+     * (in canvas-3d screen pixel space, after fold+orbit+perspective).
+     */
+    function buildExportMesh(N) {
       const W = canvas3d.clientWidth;
       const H = canvas3d.clientHeight;
       const { ux, uy } = axis();
       const angleRad = state.angle * Math.PI / 180;
       const P = state.perspective;
-
-      // Origin of transform = line midpoint (in pixel coords)
       const originX = ((state.pointA.x + state.pointB.x) / 2) * W;
       const originY = ((state.pointA.y + state.pointB.y) / 2) * H;
+      const orbitXRad = state.orbitX * Math.PI / 180;
+      const orbitYRad = state.orbitY * Math.PI / 180;
+      const params = { W, H, originX, originY, ux, uy, angleRad, P, orbitXRad, orbitYRad };
 
-      // Mesh density (per half)
-      const N = 16;
-
-      // For each half: build a mesh of (N+1) × (N+1) points, parameterized in
-      // canvas pixel space. Each point has source UV = its own pixel coord.
-      // For each point: project to 2D and store both source and destination.
-      const halves = [
-        { sign: -1, cornerTest: (s) => s <= 0 }, // top half (negative side of line)
-        { sign: +1, cornerTest: (s) => s >= 0 }, // bottom half (positive side)
-      ];
-
-      // Compute clipping polygon for each half (in canvas pixel coords)
       const corners = [
-        { x: 0, y: 0 },
-        { x: W, y: 0 },
-        { x: W, y: H },
-        { x: 0, y: H },
+        { x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H },
       ];
       const Apx = { x: state.pointA.x * W, y: state.pointA.y * H };
       const Bpx = { x: state.pointB.x * W, y: state.pointB.y * H };
       const cornerSides = corners.map(c => sideOfLine(c.x, c.y, Apx.x, Apx.y, Bpx.x, Bpx.y));
 
+      const halves = [
+        { sign: -1, cornerTest: (s) => s <= 0 },
+        { sign: +1, cornerTest: (s) => s >= 0 },
+      ];
+
       const halfPolygons = halves.map((half) => {
         const pts = [];
         for (let i = 0; i < 4; i++) {
           const next = (i + 1) % 4;
-          const c = corners[i];
-          const cn = corners[next];
-          const s = cornerSides[i];
-          const sn = cornerSides[next];
+          const c = corners[i], cn = corners[next];
+          const s = cornerSides[i], sn = cornerSides[next];
           if (half.cornerTest(s)) pts.push(c);
           if (s * sn < 0) {
             const inter = lineIntersect(c, cn, Apx, Bpx);
@@ -866,127 +997,93 @@
         return pts;
       });
 
-      // Compute bounding box in destination space (post-projection) to size the SVG
-      const allDests = [];
+      // For each half, project (N+1) × (N+1) grid points
       const halfDests = halves.map((half) => {
         const dest = [];
-        // Sample mesh points across the whole canvas, then triangulate within each half's polygon
-        // For simplicity: use a regular grid for source, project each point. Triangles
-        // are emitted only if their centroid is inside the half's polygon.
         for (let iy = 0; iy <= N; iy++) {
           for (let ix = 0; ix <= N; ix++) {
             const u = (ix / N) * W;
             const v = (iy / N) * H;
-            const projected = projectPoint(u, v, half.sign, W, H, originX, originY, ux, uy, angleRad, P);
+            const projected = projectPointFull(u, v, half.sign, params);
             dest.push({ u, v, x: projected.x, y: projected.y });
-            allDests.push(projected);
           }
         }
         return dest;
       });
 
-      // Bounding box (with some padding)
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const p of allDests) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-      const pad = 20;
-      minX -= pad; minY -= pad; maxX += pad; maxY += pad;
-      const svgW = maxX - minX;
-      const svgH = maxY - minY;
-
-      // Helper: test if a point (px, py) is inside polygon (array of {x, y})
-      function pointInPoly(px, py, poly) {
-        let inside = false;
-        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-          const xi = poly[i].x, yi = poly[i].y;
-          const xj = poly[j].x, yj = poly[j].y;
-          const intersect = ((yi > py) !== (yj > py)) &&
-            (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi);
-          if (intersect) inside = !inside;
-        }
-        return inside;
-      }
-
-      // Build SVG
-      const svgParts = [];
-      svgParts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="${minX} ${minY} ${svgW} ${svgH}">`);
-      svgParts.push(`<defs>`);
-      // We embed the source image once and reference it by id
-      svgParts.push(`<image id="src" href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" />`);
-
-      // For each half: emit triangles
-      let triCount = 0;
-      const halfTriangles = halves.map((half, halfIdx) => {
+      // Collect triangles (only those whose centroid is inside the half's polygon)
+      const triangles = [];
+      for (let halfIdx = 0; halfIdx < halves.length; halfIdx++) {
         const dest = halfDests[halfIdx];
         const poly = halfPolygons[halfIdx];
-        const tris = [];
         for (let iy = 0; iy < N; iy++) {
           for (let ix = 0; ix < N; ix++) {
             const i00 = iy * (N + 1) + ix;
             const i10 = i00 + 1;
             const i01 = i00 + (N + 1);
             const i11 = i01 + 1;
-            const p00 = dest[i00];
-            const p10 = dest[i10];
-            const p01 = dest[i01];
-            const p11 = dest[i11];
-
-            // Two triangles per cell
-            // Triangle 1: 00, 10, 11
-            // Triangle 2: 00, 11, 01
-            const t1 = [p00, p10, p11];
-            const t2 = [p00, p11, p01];
-
-            for (const tri of [t1, t2]) {
-              // Centroid test (in source space) — only emit if centroid is inside half polygon
-              const centroidU = (tri[0].u + tri[1].u + tri[2].u) / 3;
-              const centroidV = (tri[0].v + tri[1].v + tri[2].v) / 3;
-              if (pointInPoly(centroidU, centroidV, poly)) {
-                tris.push(tri);
-              }
+            const candidates = [
+              [dest[i00], dest[i10], dest[i11]],
+              [dest[i00], dest[i11], dest[i01]],
+            ];
+            for (const tri of candidates) {
+              const cu = (tri[0].u + tri[1].u + tri[2].u) / 3;
+              const cv = (tri[0].v + tri[1].v + tri[2].v) / 3;
+              if (pointInPoly(cu, cv, poly)) triangles.push(tri);
             }
           }
         }
-        return tris;
-      });
+      }
 
-      // Emit clipPath defs
-      let triId = 0;
-      const triEntries = [];
-      for (let halfIdx = 0; halfIdx < halves.length; halfIdx++) {
-        for (const tri of halfTriangles[halfIdx]) {
-          const id = `tri${triId++}`;
-          // Source-space clip polygon
-          const clipPath = `<clipPath id="${id}-clip" clipPathUnits="userSpaceOnUse"><polygon points="${tri.map(p => `${p.u},${p.v}`).join(' ')}" /></clipPath>`;
-          svgParts.push(clipPath);
-          triEntries.push({ id, tri });
+      // Convert source UVs from canvas pixel space to image pixel space
+      const scaleU = state.imageW / W;
+      const scaleV = state.imageH / H;
+      for (const tri of triangles) {
+        for (const p of tri) {
+          p.u *= scaleU;
+          p.v *= scaleV;
         }
       }
-      svgParts.push(`</defs>`);
 
-      // Emit one group per triangle
-      for (const { id, tri } of triEntries) {
+      // Compute bounding box of destinations
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const tri of triangles) {
+        for (const p of tri) {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        }
+      }
+      return { triangles, bbox: { minX, minY, maxX, maxY } };
+    }
+
+    function exportSVG() {
+      const { triangles, bbox } = buildExportMesh(16);
+      const pad = 20;
+      const minX = bbox.minX - pad, minY = bbox.minY - pad;
+      const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
+      const svgW = maxX - minX, svgH = maxY - minY;
+
+      const parts = [];
+      parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${svgW.toFixed(2)}" height="${svgH.toFixed(2)}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${svgW.toFixed(2)} ${svgH.toFixed(2)}">`);
+      parts.push(`<defs>`);
+      triangles.forEach((tri, i) => {
+        parts.push(`<clipPath id="t${i}" clipPathUnits="userSpaceOnUse"><polygon points="${tri.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' ')}" /></clipPath>`);
+      });
+      parts.push(`</defs>`);
+      triangles.forEach((tri, i) => {
         const m = computeAffine(
           tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
           tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
         );
-        if (!m) continue;
+        if (!m) return;
         const matrix = `matrix(${m.map(n => n.toFixed(4)).join(' ')})`;
-        // Apply transform to a clipped image
-        svgParts.push(`<g transform="${matrix}"><image href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" clip-path="url(#${id}-clip)" preserveAspectRatio="none" /></g>`);
-      }
+        parts.push(`<g transform="${matrix}"><image href="${state.imageSrc}" width="${state.imageW}" height="${state.imageH}" clip-path="url(#t${i})" preserveAspectRatio="none" /></g>`);
+      });
+      parts.push(`</svg>`);
+      const svg = parts.join('\n');
 
-      // Optional: include the line + handles as overlay (commented by default to keep export clean)
-      // Uncomment if you want them in the SVG too.
-
-      svgParts.push(`</svg>`);
-      const svg = svgParts.join('\n');
-
-      // Trigger download
       const blob = new Blob([svg], { type: 'image/svg+xml' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -997,6 +1094,71 @@
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 100);
     }
+
+    function exportPNG(scale = 2) {
+      const { triangles, bbox } = buildExportMesh(20);
+      const pad = 20;
+      const minX = bbox.minX - pad, minY = bbox.minY - pad;
+      const maxX = bbox.maxX + pad, maxY = bbox.maxY + pad;
+      const w = (maxX - minX);
+      const h = (maxY - minY);
+
+      // Create canvas at scale × screen resolution
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(w * scale);
+      cv.height = Math.round(h * scale);
+      const ctx = cv.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      // Translate so bbox.minX/Y maps to 0 in canvas, scale to scale factor
+      ctx.scale(scale, scale);
+      ctx.translate(-minX, -minY);
+
+      const img = new Image();
+      img.onload = () => {
+        // Draw each triangle: clip to dest triangle, set affine matrix, drawImage(img, 0, 0, srcW, srcH)
+        // The matrix is constructed so that source (u, v) maps to destination (x, y).
+        for (const tri of triangles) {
+          const m = computeAffine(
+            tri[0].u, tri[0].v, tri[1].u, tri[1].v, tri[2].u, tri[2].v,
+            tri[0].x, tri[0].y, tri[1].x, tri[1].y, tri[2].x, tri[2].y
+          );
+          if (!m) continue;
+          ctx.save();
+          // Clip to destination triangle (so neighbours don't overdraw past their share)
+          ctx.beginPath();
+          ctx.moveTo(tri[0].x, tri[0].y);
+          ctx.lineTo(tri[1].x, tri[1].y);
+          ctx.lineTo(tri[2].x, tri[2].y);
+          ctx.closePath();
+          ctx.clip();
+          // Apply the source-to-destination affine
+          ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+          ctx.drawImage(img, 0, 0, state.imageW, state.imageH);
+          ctx.restore();
+        }
+        // Trigger download
+        cv.toBlob((blob) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `image-fold-${Date.now()}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+        }, 'image/png');
+      };
+      img.src = state.imageSrc;
+    }
+
+    document.getElementById('ctl-export-svg').addEventListener('click', () => {
+      if (state.imageSrc) exportSVG();
+    });
+    document.getElementById('ctl-export-png').addEventListener('click', () => {
+      if (state.imageSrc) exportPNG(2);
+    });
 
     // ============================================================
     // INIT
